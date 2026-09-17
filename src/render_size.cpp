@@ -137,7 +137,16 @@ void hook(void* address,void* replacement,void** original,std::vector<void*>& cr
 void installRenderSizeHooks(IDXGISwapChain* probe,const std::filesystem::path& configuration){
     std::array<wchar_t,32768> exe{};GetModuleFileNameW(nullptr,exe.data(),static_cast<DWORD>(exe.size()));
     const auto path=configuration.empty()?std::filesystem::path(exe.data()).parent_path()/L"mgs5vr-display.ini":configuration;
-    if(GetPrivateProfileIntW(L"display",L"enabled",0,path.c_str())!=1)return;
+    if(GetPrivateProfileIntW(L"display",L"enabled",0,path.c_str())!=1){
+        // State is logged, never silent: the most common support question is a
+        // display adapter that appears to do nothing because this file was
+        // missing, placed elsewhere, or named like another mod config.
+        const auto missing=GetFileAttributesW(path.c_str())==INVALID_FILE_ATTRIBUTES;
+        log(missing
+            ?std::string("Display adapter inactive: no mgs5vr-display.ini beside the game executable (expected ")+path.string()+")"
+            :std::string("Display adapter inactive: display enabled is not 1 in ")+path.string());
+        return;
+    }
     renderWidth=GetPrivateProfileIntW(L"display",L"render_width",0,path.c_str());
     renderHeight=GetPrivateProfileIntW(L"display",L"render_height",0,path.c_str());
     mirrorWidth=GetPrivateProfileIntW(L"display",L"mirror_width",960,path.c_str());

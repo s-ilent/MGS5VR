@@ -34,7 +34,10 @@ engine's frame loop never blocks on the shared-texture transfer itself. When
 the consumer still owns the mutex the worker retries instead of dropping the
 pair, and a newer completed pair always replaces an older pending one. Set
 threaded_publish=0 under the diagnostics section of mgs5vr.ini to keep
-transfers inline on the present thread.
+transfers inline on the present thread. The display adapter also reports its
+own state at startup: when mgs5vr-display.ini is missing beside the game
+executable, or its display section is not enabled, mgs5vr.log says so and
+records the path it checked, so an inactive adapter is never silent.
 Simulation delta time is not patched.
 Critical engine workers yield with `Sleep(0)` when idle; other worker delays
 remain unchanged. A paired one-millisecond timer request prevents coarse
@@ -53,6 +56,11 @@ runtime lists it as supported. Otherwise, set 90 Hz in the headset PC software.
   timeline time, including any scheduling gaps, not a GPU utilization percentage.
 - `scene_cpu_ms_mean_p95_max`: CPU wall time spent generating both eye scenes.
 - `Native present ms`: time in capture, producer pacing and desktop presentation.
+- `Native stereo source=`: periodic publication health. The trailing counters are
+  FinishCommandList calls, ExecuteCommandList calls, tagged finishes, tagged
+  executions, completed command pairs, the last capture failure code, and the
+  live family/finished-list sizes. A failure code that keeps climbing while
+  pairs stall identifies where native scenes are lost.
 - `Mailbox ... ms`: acquire, copy-queue, flush and release mean/max times for
   the shared texture transfer, reported separately for producer and consumer.
   With the publish worker enabled the producer values are measured on that

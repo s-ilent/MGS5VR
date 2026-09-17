@@ -232,7 +232,14 @@ bool publishSceneEyes(IDXGISwapChain* swap,ID3D11DeviceContext* context,TextureM
         ||!readyEyePair(packet->eyes,packet->eyes[0].activation,steadyMilliseconds()))return false;
     if(!destination.publishStereo({packet->textures[0].Get(),packet->textures[1].Get()},context,packet->eyes))return false;
     published=packet->eyes[0].sourceSequence;
-    if(published%120==1)log("Native stereo source="+std::to_string(published)+" executed command pairs="+std::to_string(executed.load()));
+    if(published%120==1){
+        const auto counters=sceneCaptureCounters();
+        std::ostringstream detail;
+        for(size_t i=0;i<counters.size();++i){if(i)detail<<',';detail<<counters[i];}
+        log("Native stereo source="+std::to_string(published)+" executed command pairs="+std::to_string(executed.load())
+            +" finish,execute,taggedFinish,taggedExec,executed,lastFail,families,finished="
+            +detail.str());
+    }
     return true;
 }
 void invalidateSceneCapture(){std::lock_guard lock(mutex);target.Reset();recording.clear();finished.clear();families.clear();completed.reset();
