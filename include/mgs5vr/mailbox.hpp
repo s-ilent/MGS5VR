@@ -3,8 +3,13 @@
 #include <d3d11.h>
 #include <dxgi.h>
 #include <wrl/client.h>
+#include <atomic>
+#include <condition_variable>
+#include <deque>
 #include <memory>
 #include <mutex>
+#include <thread>
+#include <utility>
 #include "core.hpp"
 #include "stereo.hpp"
 
@@ -29,12 +34,35 @@ public:
     bool publishStereo(const std::array<ID3D11Texture2D*,2>& sources,ID3D11DeviceContext* context,const std::array<EyeFrame,2>& eyes);
     std::shared_ptr<TextureChannel> latest() const;
     void invalidate();
+    // Default on. When disabled, transfers run inline on the calling thread.
+    void setThreadedPublish(bool on) noexcept { threadedPublish_.store(on); }
+    ~TextureMailbox();
 private:
     bool publishImages(const std::array<ID3D11Texture2D*,2>& sources,uint32_t count,ID3D11DeviceContext* context,const std::array<EyeFrame,2>& eyes);
+    bool publishInline(const std::array<ID3D11Texture2D*,2>& sources,uint32_t count,ID3D11DeviceContext* context,const std::array<EyeFrame,2>& eyes,const std::shared_ptr<TextureChannel>& channel,FrameId frame);
+    bool publishEnqueue(const std::array<ID3D11Texture2D*,2>& sources,uint32_t count,const std::shared_ptr<TextureChannel>& channel,const std::array<EyeFrame,2>& eyes,FrameId frame);
+    void startWorker();
+    void publishWorker();
+    struct PublishJob {
+        std::array<ComPtr<ID3D11Texture2D>,2> sources{};
+        uint32_t count{};
+        std::shared_ptr<TextureChannel> channel;
+        std::array<EyeFrame,2> eyes{};
+        FrameId frame{};
+    };
     mutable std::mutex pointerMutex_;
     std::mutex producerMutex_;
     std::shared_ptr<TextureChannel> channel_;
     uint64_t epoch_{}, sequence_{};
+    // Off-thread delivery: the present thread validates and enqueues; one worker
+    // owns every keyed-mutex handshake and GPU copy, so the game's frame loop
+    // never blocks on the XR consumer or on the publish transfer itself.
+    std::atomic_bool threadedPublish_{};
+    std::atomic_bool quit_{};
+    std::mutex jobMutex_;
+    std::condition_variable jobCv_;
+    std::deque<PublishJob> jobs_;
+    std::thread worker_;
 };
 class TextureConsumer {
 public:

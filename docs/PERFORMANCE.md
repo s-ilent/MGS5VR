@@ -27,7 +27,15 @@ feeds the asynchronous 90 Hz consumer with the same margin and adapts to 72 or
 the producer assumes the historical 120 FPS. The cap also applies to title and
 loading screens. On the consumer side, the XR loop snapshots the shared mailbox
 only when the producer has completed a newer scene transaction, so XR ticks
-between publications no longer repeat full-texture copies. Simulation delta time is not patched.
+between publications no longer repeat full-texture copies. Producer transfers
+also leave the game's present thread: capture validates and enqueues, and a
+dedicated worker performs the keyed-mutex handshake and the GPU copy, so the
+engine's frame loop never blocks on the shared-texture transfer itself. When
+the consumer still owns the mutex the worker retries instead of dropping the
+pair, and a newer completed pair always replaces an older pending one. Set
+threaded_publish=0 under the diagnostics section of mgs5vr.ini to keep
+transfers inline on the present thread.
+Simulation delta time is not patched.
 Critical engine workers yield with `Sleep(0)` when idle; other worker delays
 remain unchanged. A paired one-millisecond timer request prevents coarse
 Windows sleep timing from limiting native frame production.
@@ -47,6 +55,8 @@ runtime lists it as supported. Otherwise, set 90 Hz in the headset PC software.
 - `Native present ms`: time in capture, producer pacing and desktop presentation.
 - `Mailbox ... ms`: acquire, copy-queue, flush and release mean/max times for
   the shared texture transfer, reported separately for producer and consumer.
+  With the publish worker enabled the producer values are measured on that
+  worker, including any wait for the consumer to free the mutex.
 - `submissions_fps`: OpenXR submissions while native VR is active.
 - `new_pairs_fps`: submissions with a different native scene transaction.
 - `repeated_or_empty` and `empty`: submissions without a new pair and submissions

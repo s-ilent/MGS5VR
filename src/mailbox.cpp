@@ -48,9 +48,15 @@ bool supported(DXGI_FORMAT f) {
 }
 std::shared_ptr<TextureChannel> TextureMailbox::latest() const { std::lock_guard lock(pointerMutex_); return channel_; }
 void TextureMailbox::invalidate() {
+    {std::lock_guard jobs(jobMutex_);jobs_.clear();}
     std::lock_guard producer(producerMutex_);
     std::lock_guard pointer(pointerMutex_);
     channel_.reset();
+}
+TextureMailbox::~TextureMailbox() {
+    quit_.store(true);
+    jobCv_.notify_all();
+    if(worker_.joinable())worker_.join();
 }
 bool TextureMailbox::publish(ID3D11Texture2D* source,ID3D11DeviceContext* context,EyeFrame eye) {
     return publishImages({source,nullptr},1,context,{eye,{}});
@@ -101,16 +107,119 @@ bool TextureMailbox::publishImages(const std::array<ID3D11Texture2D*,2>& sources
         channel->epoch=++epoch_;
         std::lock_guard pointer(pointerMutex_); channel_=channel;
     }
+    const FrameId frame{channel->epoch,++sequence_};
+    if(threadedPublish_.load())return publishEnqueue(sources,count,channel,eyes,frame);
+    return publishInline(sources,count,context,eyes,channel,frame);
+}
+bool TextureMailbox::publishInline(const std::array<ID3D11Texture2D*,2>& sources,uint32_t count,ID3D11DeviceContext* context,const std::array<EyeFrame,2>& eyes,const std::shared_ptr<TextureChannel>& channel,FrameId frame){
+    D3D11_TEXTURE2D_DESC desc{};sources[0]->GetDesc(&desc);
     const auto acquiring=CaptureClock::now();if(!acquire(channel->mutex.Get(),0)) return false;
     KeyRelease release(channel->mutex.Get(),1,context,elapsed(acquiring,CaptureClock::now()));
     for(uint32_t n=0;n<count;++n){
         if(desc.SampleDesc.Count>1)context->ResolveSubresource(channel->texture.Get(),n,sources[n],0,desc.Format);
         else context->CopySubresourceRegion(channel->texture.Get(),n,0,0,0,sources[n],0,nullptr);
     }
-    checkHr(device->GetDeviceRemovedReason(),"Producer device health");
-    channel->published={channel->epoch,++sequence_};
+    checkHr(channel->producerDevice->GetDeviceRemovedReason(),"Producer device health");
+    channel->published=frame;
     channel->eyes=eyes;
     return true;
+}
+bool TextureMailbox::publishEnqueue(const std::array<ID3D11Texture2D*,2>& sources,uint32_t count,const std::shared_ptr<TextureChannel>& channel,const std::array<EyeFrame,2>& eyes,FrameId frame){
+    startWorker();
+    {
+        std::lock_guard lock(jobMutex_);
+        // Newest wins when the worker falls behind a burst, mirroring the
+        // single-slot mailbox the consumer reads: the freshest completed pair
+        // is the only one the XR thread would display anyway.
+        while(jobs_.size()>=3)jobs_.pop_front();
+        auto& job=jobs_.emplace_back();
+        for(uint32_t n=0;n<count;++n)job.sources[n]=sources[n];
+        job.count=count;job.channel=channel;job.eyes=eyes;job.frame=frame;
+    }
+    jobCv_.notify_one();
+    return true;
+}
+void TextureMailbox::startWorker(){
+    if(worker_.joinable())return;
+    try{
+        worker_=std::thread(&TextureMailbox::publishWorker,this);
+    }catch(...){
+        // Without a worker every transfer stays on the calling thread.
+        threadedPublish_.store(false);
+    }
+}
+void TextureMailbox::publishWorker(){
+    ComPtr<ID3D11DeviceContext> deferred,immediate;
+    ComPtr<ID3D11Device> deviceSeen;
+    for(;;){
+        PublishJob work;
+        {
+            std::unique_lock lock(jobMutex_);
+            jobCv_.wait(lock,[&]{return !jobs_.empty()||quit_.load();});
+            if(quit_.load())return;
+            work=std::move(jobs_.front());
+            jobs_.pop_front();
+        }
+        const auto channel=work.channel;
+        if(!channel||!work.sources[0]||!work.count)continue;
+        try{
+            const auto device=channel->producerDevice;
+            if(!deferred||deviceSeen.Get()!=device.Get()){
+                ComPtr<ID3D11DeviceContext> created;
+                checkHr(device->CreateDeferredContext(0,&created),"Create mailbox publish context");
+                device->GetImmediateContext(&immediate);
+                deferred=created;
+                deviceSeen=device;
+            }
+        }catch(...){
+            // A single-threaded device rejects deferred contexts. Fall back to
+            // inline transfers permanently instead of failing every publish.
+            threadedPublish_.store(false);
+            static std::atomic_bool reported{};
+            if(!reported.exchange(true))log("Mailbox publish worker disabled; transfers remain on the present thread");
+            continue;
+        }
+        const auto pickup=CaptureClock::now();
+        bool acquired{};
+        try{
+            // The consumer owns the mutex between its own snapshots. Retry
+            // instead of dropping the pair; a newer pair replaces this job when
+            // one is waiting, otherwise waiting preserves it.
+            while(!(acquired=acquire(channel->mutex.Get(),0))){
+                bool replaced{};
+                {std::lock_guard lock(jobMutex_);replaced=!jobs_.empty()||quit_.load();}
+                if(replaced)break;
+                Sleep(1);
+            }
+            if(!acquired)continue;
+            KeyRelease release(channel->mutex.Get(),1,immediate.Get(),elapsed(pickup,CaptureClock::now()));
+            deferred->ClearState();
+            for(uint32_t n=0;n<work.count;++n){
+                D3D11_TEXTURE2D_DESC sample{};work.sources[n]->GetDesc(&sample);
+                if(sample.SampleDesc.Count>1)deferred->ResolveSubresource(channel->texture.Get(),n,work.sources[n].Get(),0,sample.Format);
+                else deferred->CopySubresourceRegion(channel->texture.Get(),n,0,0,0,work.sources[n].Get(),0,nullptr);
+            }
+            ComPtr<ID3D11CommandList> list;
+            checkHr(deferred->FinishCommandList(FALSE,&list),"Record mailbox publish");
+            ID3D11CommandList* lists[]={list.Get()};
+            immediate->ExecuteCommandLists(1,lists);
+            checkHr(deviceSeen->GetDeviceRemovedReason(),"Producer device health");
+            // Metadata lands before the keyed handoff; the consumer reads it
+            // only while holding the mutex, exactly as with inline transfers.
+            channel->published=work.frame;
+            channel->eyes=work.eyes;
+        }catch(const std::exception& error){
+            // Never strand the keyed mutex: hand the key back even for a failed
+            // transfer so the consumer keeps ticking.
+            if(acquired)channel->mutex->ReleaseSync(1);
+            static std::atomic_bool reported{};
+            if(!reported.exchange(true))log(std::string("Mailbox publish worker retrying after: ")+error.what());
+        }catch(...){
+            if(acquired)channel->mutex->ReleaseSync(1);
+            static std::atomic_bool reported{};
+            if(!reported.exchange(true))log("Mailbox publish worker retrying after an unexpected exception");
+        }
+    }
 }
 TextureConsumer::TextureConsumer(ID3D11Device* device):device_(device) {
     if(!device) throw std::invalid_argument("missing consumer device");

@@ -135,6 +135,11 @@ DWORD WINAPI initialize(void*){
         if(!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS|GET_MODULE_HANDLE_EX_FLAG_PIN,
             reinterpret_cast<LPCWSTR>(&initialize),&pinned))throw std::runtime_error("Cannot pin capture module");
         auto& mailbox=*new TextureMailbox;
+        const bool threadedPublish=GetPrivateProfileIntW(L"diagnostics",L"threaded_publish",1,ini.c_str())==1;
+        mailbox.setThreadedPublish(threadedPublish);
+        log(std::string("Mailbox publish worker ")+(threadedPublish
+            ?"enabled; keyed-mutex transfers leave the game's present thread"
+            :"disabled by configuration; transfers stay on the present thread"));
         if(target->nativeAdapter&&GetPrivateProfileIntW(L"diagnostics",L"head_camera_experiment",0,ini.c_str())==1)
             log(enableNativeFrameRate(reinterpret_cast<uintptr_t>(GetModuleHandleW(nullptr)))
                 ?"Native variable frame rate enabled; producer paced just above the XR consumer cadence (120 FPS assumed until the session reports its display period)"
