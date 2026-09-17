@@ -1,5 +1,6 @@
 #include "mgs5vr/xr_runtime.hpp"
 #include "mgs5vr/log.hpp"
+#include "mgs5vr/native_performance.hpp"
 #include "mgs5vr/input_bridge.hpp"
 #include "mgs5vr/controls.hpp"
 #include "mgs5vr/native_controls.hpp"
@@ -947,6 +948,10 @@ RuntimeStats runTheatre(TextureMailbox& source,const TheatreConfig& config,const
         if(!session.running){std::this_thread::sleep_for(std::chrono::milliseconds(10));continue;}
         XrFrameWaitInfo wi{XR_TYPE_FRAME_WAIT_INFO};XrFrameState frame{XR_TYPE_FRAME_STATE};
         xrCheck(xrWaitFrame(session.handle,&wi,&frame),"Wait XR frame");
+        // Feed the real consumer cadence to the producer pacer. Early frames
+        // precede any published scene; the pacer keeps its fallback until the
+        // runtime reports a plausible display period.
+        reportConsumerDisplayPeriod(frame.predictedDisplayPeriod);
         const auto waitDone=steadyMilliseconds();
         XrFrameBeginInfo bi{XR_TYPE_FRAME_BEGIN_INFO};xrCheck(xrBeginFrame(session.handle,&bi),"Begin XR frame");
         EndFrameGuard guard{session.handle,frame.predictedDisplayTime};++stats.frames;

@@ -137,7 +137,7 @@ DWORD WINAPI initialize(void*){
         auto& mailbox=*new TextureMailbox;
         if(target->nativeAdapter&&GetPrivateProfileIntW(L"diagnostics",L"head_camera_experiment",0,ini.c_str())==1)
             log(enableNativeFrameRate(reinterpret_cast<uintptr_t>(GetModuleHandleW(nullptr)))
-                ?"Native variable frame rate enabled; producer capped at 120 FPS for the 90 Hz target"
+                ?"Native variable frame rate enabled; producer paced just above the XR consumer cadence (120 FPS assumed until the session reports its display period)"
                 :"Native frame-rate signatures differ; original limiter retained");
         installCaptureHook(mailbox);
         installProcessExitHook(&cleanupBeforeExit);

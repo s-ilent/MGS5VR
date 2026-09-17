@@ -18,6 +18,9 @@ namespace mgs5vr {
 namespace {
 std::atomic_bool enabled{};
 std::atomic_bool fineTimer{};
+// The XR session thread publishes the real display period here once OpenXR is
+// running. Until then the producer keeps the historical 120 FPS assumption.
+std::atomic<long long> consumerPeriodNs{};
 using TimerResolutionFn=LONG(WINAPI*)(ULONG,BOOLEAN,PULONG);
 TimerResolutionFn setTimerResolution{};
 std::atomic_bool nativeTimer{};
@@ -76,8 +79,15 @@ void stopNativePerformance() noexcept {
 }
 void paceNativePresent() noexcept {
     if(!enabled.load())return;
-    // A 120 FPS producer leaves scheduling margin for the 90 Hz consumer.
-    // Cap title/loading too: unlimited loading rates are unsafe in this engine.
+    // A producer slightly faster than the consumer keeps the mailbox fresh
+    // while leaving the compositor scheduling margin. The XR thread reports
+    // the real display period once the session runs; 75 percent of it matches
+    // the historical 120 FPS producer for a 90 Hz consumer and restores the
+    // same margin at 72 or 120 Hz. Cap title/loading too: unlimited loading
+    // rates are unsafe in this engine.
+    long long interval=8333333;
+    const long long period=consumerPeriodNs.load(std::memory_order_relaxed);
+    if(period>=1000000&&period<=50000000)interval=period-period/4;
     using Clock=std::chrono::steady_clock;
     static std::mutex mutex;std::lock_guard lock(mutex);
     static HANDLE timer=CreateWaitableTimerExW(nullptr,nullptr,CREATE_WAITABLE_TIMER_HIGH_RESOLUTION,TIMER_ALL_ACCESS);
@@ -87,8 +97,18 @@ void paceNativePresent() noexcept {
         LARGE_INTEGER due{};due.QuadPart=-std::chrono::duration_cast<std::chrono::nanoseconds>(next-now).count()/100;
         if(due.QuadPart<0&&SetWaitableTimer(timer,&due,0,nullptr,nullptr,FALSE))WaitForSingleObject(timer,50);
     }
-    next+=std::chrono::nanoseconds(8333333);
+    next+=std::chrono::nanoseconds(interval);
     if(next<Clock::now())next=Clock::now();
+}
+void reportConsumerDisplayPeriod(long long periodNs) noexcept {
+    if(periodNs<1000000||periodNs>50000000)return;
+    consumerPeriodNs.store(periodNs,std::memory_order_relaxed);
+    try{
+        static std::atomic_bool reported{};
+        if(reported.exchange(true))return;
+        log("Producer pacing tracks the XR display period ns="+std::to_string(periodNs)
+            +" producer target ns="+std::to_string(periodNs-periodNs/4));
+    }catch(...){}
 }
 void recordNativePresent(double captureMs,double pacingMs,double presentMs) noexcept {try{
     if(!enabled.load())return;

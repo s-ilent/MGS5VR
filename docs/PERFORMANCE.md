@@ -19,9 +19,15 @@ reads the active OpenXR recommendation without changing Windows resolution or
 using DSR. No upscaler, generated frames or third-party clarity plugin is included.
 
 The VR graphics adapter selects the engine's variable frame-rate option and
-removes desktop V-sync from the game mirror. Its producer is capped at 120 FPS
-to feed the asynchronous 90 Hz OpenXR consumer with a small margin. The cap also
-applies to title and loading screens. Simulation delta time is not patched.
+removes desktop V-sync from the game mirror. Its producer is paced just above
+the OpenXR consumer cadence: once the session reports a plausible predicted
+display period, the producer target becomes 75 percent of that period. This
+feeds the asynchronous 90 Hz consumer with the same margin and adapts to 72 or
+120 Hz headsets without a rebuild-specific constant; before the first XR frame
+the producer assumes the historical 120 FPS. The cap also applies to title and
+loading screens. On the consumer side, the XR loop snapshots the shared mailbox
+only when the producer has completed a newer scene transaction, so XR ticks
+between publications no longer repeat full-texture copies. Simulation delta time is not patched.
 Critical engine workers yield with `Sleep(0)` when idle; other worker delays
 remain unchanged. A paired one-millisecond timer request prevents coarse
 Windows sleep timing from limiting native frame production.
