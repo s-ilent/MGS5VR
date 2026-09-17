@@ -129,6 +129,11 @@ bool TextureConsumer::consume(const std::shared_ptr<TextureChannel>& channel) {
     }
     const auto acquiring=CaptureClock::now();if(!acquire(mutex_.Get(),1)) return false;
     KeyRelease release(mutex_.Get(),0,context_.Get(),elapsed(acquiring,CaptureClock::now()));
+    // The producer has not completed a newer scene transaction since the last
+    // snapshot. Repeating the full-texture copy would spend the same GPU
+    // bandwidth on identical pixels in every XR tick between publications and
+    // deepen the command queue behind the game's own stereo rendering.
+    if(channel->published==frame_) return false;
     context_->CopyResource(cached_.Get(),shared_.Get());
     checkHr(device_->GetDeviceRemovedReason(),"Consumer device health");
     frame_=channel->published;
