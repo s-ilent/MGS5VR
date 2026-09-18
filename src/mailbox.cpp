@@ -1,4 +1,5 @@
 #include "mgs5vr/mailbox.hpp"
+#include <d3d11_1.h>
 #include <stdexcept>
 #include <sstream>
 #include <chrono>
@@ -170,6 +171,12 @@ void TextureMailbox::publishWorker(){
                 device->GetImmediateContext(&immediate);
                 deferred=created;
                 deviceSeen=device;
+                // This worker executes command lists on the immediate context
+                // while the game renders. Ask the driver to serialize that
+                // access; DXVK always serializes anyway, native D3D11.1
+                // drivers honor the toggle (most engines already enable it).
+                ComPtr<ID3D11Multithread> protection;
+                if(SUCCEEDED(immediate->QueryInterface(IID_PPV_ARGS(&protection))))protection->SetMultithreadProtected(TRUE);
             }
         }catch(...){
             // A single-threaded device rejects deferred contexts. Fall back to
@@ -193,7 +200,10 @@ void TextureMailbox::publishWorker(){
             }
             if(!acquired)continue;
             KeyRelease release(channel->mutex.Get(),1,immediate.Get(),elapsed(pickup,CaptureClock::now()));
-            deferred->ClearState();
+            // No ClearState here: it would be recorded into the command list
+            // and executed against the immediate context, wiping the game's
+            // bindings. FinishCommandList(FALSE) already resets the recording
+            // context between publishes, and plain copies need no state.
             for(uint32_t n=0;n<work.count;++n){
                 D3D11_TEXTURE2D_DESC sample{};work.sources[n]->GetDesc(&sample);
                 if(sample.SampleDesc.Count>1)deferred->ResolveSubresource(channel->texture.Get(),n,work.sources[n].Get(),0,sample.Format);
@@ -201,8 +211,9 @@ void TextureMailbox::publishWorker(){
             }
             ComPtr<ID3D11CommandList> list;
             checkHr(deferred->FinishCommandList(FALSE,&list),"Record mailbox publish");
-            ID3D11CommandList* lists[]={list.Get()};
-            immediate->ExecuteCommandLists(1,lists);
+            // D3D11 executes a single command list on the immediate context;
+            // the plural D3D12-style overload does not exist on it.
+            immediate->ExecuteCommandList(list.Get(),FALSE);
             checkHr(deviceSeen->GetDeviceRemovedReason(),"Producer device health");
             // Metadata lands before the keyed handoff; the consumer reads it
             // only while holding the mutex, exactly as with inline transfers.
