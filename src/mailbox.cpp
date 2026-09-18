@@ -1,5 +1,4 @@
 #include "mgs5vr/mailbox.hpp"
-#include <d3d11_1.h>
 #include <stdexcept>
 #include <sstream>
 #include <chrono>
@@ -171,12 +170,12 @@ void TextureMailbox::publishWorker(){
                 device->GetImmediateContext(&immediate);
                 deferred=created;
                 deviceSeen=device;
-                // This worker executes command lists on the immediate context
-                // while the game renders. Ask the driver to serialize that
-                // access; DXVK always serializes anyway, native D3D11.1
-                // drivers honor the toggle (most engines already enable it).
-                ComPtr<ID3D11Multithread> protection;
-                if(SUCCEEDED(immediate->QueryInterface(IID_PPV_ARGS(&protection))))protection->SetMultithreadProtected(TRUE);
+                // Command lists run on the immediate context from this worker
+                // while the game renders. DXVK serializes immediate-context
+                // access internally, and native engines using deferred
+                // contexts typically enable D3D11.1 multithread protection
+                // themselves (ID3D11Multithread, gated behind NTDDI in the
+                // SDK, so it is not queried here).
             }
         }catch(...){
             // A single-threaded device rejects deferred contexts. Fall back to
